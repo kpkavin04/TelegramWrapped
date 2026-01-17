@@ -3,11 +3,13 @@ from pydantic import BaseModel
 import uuid
 from datetime import datetime, timedelta, timezone
 from telethon.tl.types import MessageService
+import json
 
 from telegram.client import get_client
 from telegram.auth import send_otp, verify_otp
 from telegram.chats import get_top_chats
 from telegram.session_store import load_sessions, save_sessions
+from orchestrator import TelegramWrappedOrchestrator
 
 app = FastAPI()
 
@@ -128,8 +130,12 @@ async def fetch_messages_endpoint(request: FetchMessagesRequest):
     chat_ids = request.chat_ids
     
     sessions = load_sessions()
+
     if session_id not in sessions:
         raise HTTPException(400, "Invalid session")
+    
+    user_id = sessions[session_id]["user_id"]
+    print(user_id, type(user_id))
 
     client = get_client(session_id)
     await client.connect()
@@ -163,11 +169,17 @@ async def fetch_messages_endpoint(request: FetchMessagesRequest):
     finally:
         await client.disconnect()
 
-    return {
+    orchestrator_input =  {
         "status": "success",
         "chat_counts": {cid: len(msgs) for cid, msgs in all_chat_data.items()},
         "data": all_chat_data
     }
+
+    json_str = json.dumps(orchestrator_input)
+    
+    orchestrator = TelegramWrappedOrchestrator()
+    
+    return orchestrator.analyze_multi_chat(json.loads(json_str), str(user_id))
 
 
 @app.get("/health")
