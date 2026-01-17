@@ -1,0 +1,52 @@
+{
+  "name": "Test Chat",
+  "type": "personal_chat",
+  "id": 123456789,
+  "messages": [
+    {
+      "id": 1,
+      "type": "message",
+      "date": "2024-01-15T10:30:45",
+      "from": "Alice",
+      "from_id": "user123",
+      "text": "Hello world"
+    },
+    {
+      "id": 2,
+      "type": "message",
+      "date": "2024-01-15T10:31:12",
+      "from": "Bob",
+      "from_id": "user456",
+      "text_entities": [
+        {"type": "plain", "text": "Hi "},
+        {"type": "bold", "text": "Alice"},
+        {"type": "plain", "text": "! 👋"}
+      ]
+    },
+    {
+      "id": 3,
+      "type": "message",
+      "date": "2024-02-20T14:22:33",
+      "from": "Alice",
+      "from_id": "user123",
+      "photo": "(File not included)",
+      "text": ""
+    },
+    {
+      "id": 4,
+      "type": "service",
+      "date": "2024-02-21T09:15:00",
+      "actor": "Alice",
+      "action": "invite_members",
+      "text": ""
+    },
+    {
+      "id": 5,
+      "type": "message",
+      "date": "2024-03-10T18:45:22",
+      "from": "Bob",
+      "from_id": "user456",
+      "text": "How are you? 😊"
+    }
+  ]
+}
