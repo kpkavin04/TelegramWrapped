@@ -63,8 +63,9 @@ class TelegramWrappedOrchestrator:
         # 3. Sentiment analysis (all messages for context)
         sentiment = self.llm.analyze_sentiment_by_month(all_data['messages'])
 
-        # 4. Persona matching based on sentiment
-        persona = self.llm.match_persona(sentiment)
+        # 4. Persona matching based on sentiment + words
+        top_words = list(word_freq.keys())[:20]
+        persona = self.llm.match_persona(sentiment, top_words)
 
         # 5. Build result
         total_in_chat = len(parser.messages)
@@ -101,7 +102,7 @@ class TelegramWrappedOrchestrator:
         per_chat_results = []
         all_word_freq = Counter()
         all_emoji_freq = Counter()
-        all_sentiment = {}
+        sentiment_by_month_raw = {}  # {month: [list of sentiment dicts]}
         all_user_text = []
 
         for chat_data in chats:
@@ -115,10 +116,11 @@ class TelegramWrappedOrchestrator:
             # Aggregate emoji frequencies
             all_emoji_freq.update(result['emoji_frequency'])
 
-            # Merge sentiment timelines
+            # Collect sentiment data per month
             for month, data in result['sentiment_by_month'].items():
-                if month not in all_sentiment:
-                    all_sentiment[month] = data
+                if month not in sentiment_by_month_raw:
+                    sentiment_by_month_raw[month] = []
+                sentiment_by_month_raw[month].append(data)
 
             # Collect text for aggregate wordcloud
             parser = TelegramExportParser(chat_data)
@@ -127,13 +129,53 @@ class TelegramWrappedOrchestrator:
             user_msgs = parser.get_user_messages(user_id)
             all_user_text.extend(msg.get('text', '') for msg in user_msgs)
 
+        # Merge sentiments: keep most common emotion per month (tiebreaker: highest confidence)
+        all_sentiment = {}
+        for month, sentiments in sentiment_by_month_raw.items():
+            # Build emotion -> max confidence mapping
+            primary_confidence = {}
+            secondary_confidence = {}
+            for s in sentiments:
+                if s.get('primary') and s.get('primary') != 'error':
+                    p = s['primary']
+                    primary_confidence[p] = max(primary_confidence.get(p, 0), s.get('confidence', 0))
+                if s.get('secondary') and s.get('secondary') != 'error':
+                    sec = s['secondary']
+                    secondary_confidence[sec] = max(secondary_confidence.get(sec, 0), s.get('confidence', 0))
+
+            # Count occurrences
+            primary_counts = Counter(s.get('primary', '') for s in sentiments if s.get('primary') != 'error')
+            secondary_counts = Counter(s.get('secondary', '') for s in sentiments if s.get('secondary') != 'error')
+
+            # Pick winner: most common, tiebreaker = highest confidence
+            def pick_winner(counts, confidence_map, default):
+                if not counts:
+                    return default
+                max_count = counts.most_common(1)[0][1]
+                tied = [e for e, c in counts.items() if c == max_count]
+                if len(tied) == 1:
+                    return tied[0]
+                # Tiebreaker: highest confidence
+                return max(tied, key=lambda e: confidence_map.get(e, 0))
+
+            confidences = [s.get('confidence', 0) for s in sentiments]
+            vibes = [s.get('vibe_summary', '') for s in sentiments if s.get('vibe_summary')]
+
+            all_sentiment[month] = {
+                'primary': pick_winner(primary_counts, primary_confidence, 'wholesome'),
+                'secondary': pick_winner(secondary_counts, secondary_confidence, 'cozy'),
+                'confidence': sum(confidences) / len(confidences) if confidences else 0.0,
+                'vibe_summary': vibes[0] if vibes else ''
+            }
+
         # Generate aggregate wordcloud
         combined_text = '\n'.join(all_user_text)
         freq_counter = FrequencyCounter(combined_text)
         aggregate_wordcloud = freq_counter.generate_wordcloud()
 
-        # Persona matching on aggregate sentiment
-        aggregate_persona = self.llm.match_persona(all_sentiment)
+        # Persona matching on aggregate sentiment + words
+        aggregate_top_words = [w for w, _ in all_word_freq.most_common(20)]
+        aggregate_persona = self.llm.match_persona(all_sentiment, aggregate_top_words)
 
         # Total stats
         total_messages = sum(r['message_stats']['user_count'] for r in per_chat_results)

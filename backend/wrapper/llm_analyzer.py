@@ -142,6 +142,7 @@ Messages:
 
             try:
                 response_text = self._chat(prompt, temperature=0.7, max_tokens=512)
+                print(f"[LLM Sentiment {month}]\n{response_text}\n")
 
                 sentiment_data = {
                     'primary': 'wholesome',
@@ -180,16 +181,19 @@ Messages:
 
         return results
 
-    def match_persona(self, sentiment_by_month: Dict[str, Dict]) -> Dict[str, Any]:
-        """Match user to a cartoon persona based on aggregated emotions"""
+    def match_persona(self, sentiment_by_month: Dict[str, Dict], top_words: List[str] = None) -> Dict[str, Any]:
+        """Match user to a cartoon persona based on aggregated emotions and word usage"""
         all_primary = [v.get('primary', '') for v in sentiment_by_month.values() if v.get('primary') != 'error']
         all_secondary = [v.get('secondary', '') for v in sentiment_by_month.values() if v.get('secondary') != 'error']
         all_vibes = [v.get('vibe_summary', '') for v in sentiment_by_month.values() if v.get('vibe_summary')]
+
+        words_str = ', '.join(top_words[:20]) if top_words else 'N/A'
 
         emotion_summary = f"""
 Primary emotions over time: {', '.join(all_primary)}
 Secondary emotions over time: {', '.join(all_secondary)}
 Vibe summaries: {'; '.join(all_vibes)}
+Top 20 most used words: {words_str}
 """
 
         persona_options = '\n'.join([
@@ -197,7 +201,9 @@ Vibe summaries: {'; '.join(all_vibes)}
             for pid, p in PERSONAS.items()
         ])
 
-        prompt = f"""Based on this person's chat vibe analysis, match them to ONE cartoon character.
+        prompt = f"""Based on this person's chat vibe analysis and vocabulary, match them to ONE cartoon character.
+
+Consider both their emotional patterns AND their word choices - if their vocabulary matches how a character speaks, weight that heavily.
 
 {emotion_summary}
 
@@ -206,12 +212,13 @@ PERSONAS (pick ONE by ID):
 
 Output ONLY in this format:
 persona_id: [id from list above]
-match_reason: [1-2 sentence explanation of why this persona fits]
+match_reason: [1-2 sentence explanation of why this persona fits, mention specific words if relevant]
 confidence: [0.0-1.0]
 """
 
         try:
             response_text = self._chat(prompt, temperature=0.7, max_tokens=256)
+            print(f"[LLM Persona Response]\n{response_text}\n")
 
             result = {
                 'persona_id': 'jake',
