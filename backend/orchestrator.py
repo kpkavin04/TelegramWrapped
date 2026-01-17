@@ -6,9 +6,9 @@ Main interface for analyzing chat exports
 from typing import Dict, List, Any, Optional
 from collections import Counter
 
-from backend.json_parser.json_parser import TelegramExportParser
-from backend.wrapper.frequency_couner import FrequencyCounter
-from backend.wrapper.llm_analyzer import LLMAnalyzer
+from json_parser.json_parser import TelegramExportParser
+from wrapper.frequency_couner import FrequencyCounter
+from wrapper.llm_analyzer import LLMAnalyzer
 
 
 class TelegramWrappedOrchestrator:
