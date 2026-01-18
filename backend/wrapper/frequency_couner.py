@@ -32,7 +32,9 @@ STOPWORDS = {
     'its', "it's", 'thats', "that's", 'youre', "you're", 'were', "we're",
     # Telegram specific
     'sticker', 'forwarded', 'message', 'replied', 'reply', 'photo', 'video',
-    'voice', 'file', 'gif', 'http', 'https', 'www', 'com'
+    'voice', 'file', 'gif', 'http', 'https', 'www', 'com', 'ah','eh','mm','hmm','bro',
+    'sis','dude','lol','omg','btw','idk','smh','fyi','ty','thx','np','yw','yall','la','eh',
+    'yeah','uh','uhh','hahaha','hehe','haha','hehehe','yea','ye',
 }
 
 # Emoji regex pattern (covers most Unicode emoji)

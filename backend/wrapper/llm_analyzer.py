@@ -1,12 +1,16 @@
 import json
+import asyncio
 from typing import Dict, List, Any
-from openai import OpenAI
+from openai import AsyncOpenAI
 from collections import defaultdict
 from dotenv import load_dotenv
 import os
 
 
 MODEL_NAME = 'gpt-4o-mini'
+MAX_CONCURRENT_REQUESTS = 4  # Limit parallel LLM calls to avoid rate limits
+MAX_RETRIES = 3
+RETRY_BASE_DELAY = 1.0  # seconds
 
 GEN_Z_EMOTIONS = [
     'chaotic energy', 'unhinged', 'main character vibes', 'villain arc',
@@ -94,94 +98,168 @@ PERSONAS = {
 
 
 class LLMAnalyzer:
-    """Analyze chat messages using OpenAI API"""
+    """Analyze chat messages using OpenAI API with async support"""
 
     def __init__(self):
         load_dotenv()
-        self.client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+        self.client = AsyncOpenAI(api_key=os.getenv('OPENAI_API_KEY'))
         self.model_name = MODEL_NAME
+        self._semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
-    def _chat(self, prompt: str, temperature: float = 0.7, max_tokens: int = 512) -> str:
-        """Make a chat completion request"""
-        response = self.client.chat.completions.create(
-            model=self.model_name,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=temperature,
-            max_tokens=max_tokens
-        )
-        return response.choices[0].message.content
+    async def _chat(self, prompt: str, temperature: float = 0.7, max_tokens: int = 512) -> str:
+        """Make an async chat completion request with rate limit handling"""
+        async with self._semaphore:
+            for attempt in range(MAX_RETRIES):
+                try:
+                    response = await self.client.chat.completions.create(
+                        model=self.model_name,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=temperature,
+                        max_tokens=max_tokens
+                    )
+                    return response.choices[0].message.content
+                except Exception as e:
+                    error_str = str(e)
+                    if '429' in error_str or 'rate_limit' in error_str.lower():
+                        delay = RETRY_BASE_DELAY * (2 ** attempt)
+                        print(f"Rate limit hit, retrying in {delay}s (attempt {attempt + 1}/{MAX_RETRIES})")
+                        await asyncio.sleep(delay)
+                    else:
+                        raise
+            raise Exception(f"Max retries ({MAX_RETRIES}) exceeded for LLM call")
 
-    def analyze_sentiment_by_month(self, messages: List[Dict]) -> Dict[str, Dict]:
-        """Analyze vibe per month with Gen-Z emotions"""
+    async def _analyze_month_batch(self, months_data: List[tuple], emotions_str: str) -> Dict[str, Dict]:
+        """Analyze sentiment for a batch of months in one LLM call"""
+        # Build prompt with all months
+        months_section = []
+        for month, texts in months_data:
+            combined = '\n'.join(texts[:150])  # Fewer msgs per month in batch
+            months_section.append(f"=== {month} ===\n{combined}")
+
+        all_months = '\n\n'.join(months_section)
+        month_names = [m for m, _ in months_data]
+
+        prompt = f"""Analyze the vibe of these chat messages for EACH month listed below.
+
+For EACH month, pick a PRIMARY and SECONDARY emotion from:
+{emotions_str}
+
+Output EXACTLY in this format for each month (one block per month):
+
+[MONTH_NAME]
+primary: [emotion]
+secondary: [emotion]
+confidence: [0.0-1.0]
+vibe_summary: [short 1-sentence summary]
+
+Analyze these months: {', '.join(month_names)}
+
+Messages by month:
+{all_months}"""
+
+        try:
+            response_text = await self._chat(prompt, temperature=0.7, max_tokens=256 * len(months_data))
+            print(f"[LLM Sentiment Batch {month_names}]\n{response_text}\n")
+
+            results = {}
+            current_month = None
+            current_data = {}
+
+            for line in response_text.strip().split('\n'):
+                line = line.strip()
+                if not line:
+                    continue
+
+                # Check if line is a month header
+                line_clean = line.strip('[]').strip()
+                if line_clean in month_names or any(m in line_clean for m in month_names):
+                    # Save previous month if exists
+                    if current_month and current_data:
+                        results[current_month] = current_data
+                    # Find matching month
+                    for m in month_names:
+                        if m in line_clean:
+                            current_month = m
+                            break
+                    current_data = {
+                        'primary': 'wholesome',
+                        'secondary': 'cozy',
+                        'confidence': 0.0,
+                        'vibe_summary': ''
+                    }
+                elif ':' in line and current_month:
+                    key, value = line.split(':', 1)
+                    key = key.strip().lower()
+                    value = value.strip()
+
+                    if key == 'primary':
+                        current_data['primary'] = value
+                    elif key == 'secondary':
+                        current_data['secondary'] = value
+                    elif key == 'confidence':
+                        try:
+                            current_data['confidence'] = float(value)
+                        except ValueError:
+                            pass
+                    elif key == 'vibe_summary':
+                        current_data['vibe_summary'] = value
+
+            # Save last month
+            if current_month and current_data:
+                results[current_month] = current_data
+
+            # Fill in any missing months with defaults
+            for month, _ in months_data:
+                if month not in results:
+                    results[month] = {
+                        'primary': 'wholesome',
+                        'secondary': 'cozy',
+                        'confidence': 0.0,
+                        'vibe_summary': ''
+                    }
+
+            return results
+
+        except Exception as e:
+            print(f"Sentiment batch error: {e}")
+            return {
+                month: {
+                    'primary': 'error',
+                    'secondary': 'error',
+                    'confidence': 0.0,
+                    'vibe_summary': str(e)
+                }
+                for month, _ in months_data
+            }
+
+    async def analyze_sentiment_by_month(self, messages: List[Dict]) -> Dict[str, Dict]:
+        """Analyze vibe per month - BATCHED (3-4 months per call)"""
         by_month = defaultdict(list)
         for msg in messages:
             month = msg.get('month', 'unknown')
             by_month[month].append(msg.get('text', ''))
 
         emotions_str = ', '.join(GEN_Z_EMOTIONS)
+        sorted_months = sorted(by_month.items())
+
+        # Batch months: 4 months per LLM call
+        BATCH_SIZE = 4
+        batches = []
+        for i in range(0, len(sorted_months), BATCH_SIZE):
+            batches.append(sorted_months[i:i + BATCH_SIZE])
+
+        # Run batches in parallel
+        tasks = [self._analyze_month_batch(batch, emotions_str) for batch in batches]
+        batch_results = await asyncio.gather(*tasks)
+
+        # Merge all results
         results = {}
-
-        for month, texts in sorted(by_month.items()):
-            combined = '\n'.join(texts[:500])
-
-            prompt = f"""Analyze the overall vibe of these chat messages from {month}.
-
-Pick a PRIMARY emotion and SECONDARY emotion from this list:
-{emotions_str}
-
-Also give a confidence score 0.0-1.0 and a short 1-sentence vibe summary.
-
-Output ONLY in this format:
-primary: [emotion]
-secondary: [emotion]
-confidence: [0.0-1.0]
-vibe_summary: [short summary]
-
-Messages:
-{combined}"""
-
-            try:
-                response_text = self._chat(prompt, temperature=0.7, max_tokens=512)
-                print(f"[LLM Sentiment {month}]\n{response_text}\n")
-
-                sentiment_data = {
-                    'primary': 'wholesome',
-                    'secondary': 'cozy',
-                    'confidence': 0.0,
-                    'vibe_summary': ''
-                }
-                for line in response_text.strip().split('\n'):
-                    if ':' in line:
-                        key, value = line.split(':', 1)
-                        key = key.strip().lower()
-                        value = value.strip()
-
-                        if key == 'primary':
-                            sentiment_data['primary'] = value
-                        elif key == 'secondary':
-                            sentiment_data['secondary'] = value
-                        elif key == 'confidence':
-                            try:
-                                sentiment_data['confidence'] = float(value)
-                            except ValueError:
-                                pass
-                        elif key == 'vibe_summary':
-                            sentiment_data['vibe_summary'] = value
-
-                results[month] = sentiment_data
-
-            except Exception as e:
-                print(f"Sentiment error for {month}: {e}")
-                results[month] = {
-                    'primary': 'error',
-                    'secondary': 'error',
-                    'confidence': 0.0,
-                    'vibe_summary': str(e)
-                }
+        for batch_result in batch_results:
+            results.update(batch_result)
 
         return results
 
-    def match_persona(self, sentiment_by_month: Dict[str, Dict], top_words: List[str] = None) -> Dict[str, Any]:
+    async def match_persona(self, sentiment_by_month: Dict[str, Dict], top_words: List[str] = None) -> Dict[str, Any]:
         """Match user to a cartoon persona based on aggregated emotions and word usage"""
         all_primary = [v.get('primary', '') for v in sentiment_by_month.values() if v.get('primary') != 'error']
         all_secondary = [v.get('secondary', '') for v in sentiment_by_month.values() if v.get('secondary') != 'error']
@@ -214,22 +292,24 @@ Output ONLY in this format:
 persona_id: [id from list above]
 match_reason: [1-2 sentence explanation of why this persona fits, mention specific words if relevant]
 confidence: [0.0-1.0]
+yearly_vibe: [A fun, Gen-Z style 1-sentence summary of their overall vibe for the year, like a Spotify Wrapped tagline]
 """
 
         try:
-            response_text = self._chat(prompt, temperature=0.7, max_tokens=256)
+            response_text = await self._chat(prompt, temperature=0.7, max_tokens=256)
             print(f"[LLM Persona Response]\n{response_text}\n")
 
             result = {
                 'persona_id': 'jake',
                 'match_reason': '',
-                'confidence': 0.0
+                'confidence': 0.0,
+                'yearly_vibe': ''
             }
 
             for line in response_text.strip().split('\n'):
                 if ':' in line:
                     key, value = line.split(':', 1)
-                    key = key.strip().lower()
+                    key = key.strip().lower().replace(' ', '_')
                     value = value.strip()
 
                     if key == 'persona_id':
@@ -243,6 +323,8 @@ confidence: [0.0-1.0]
                             result['confidence'] = float(value)
                         except ValueError:
                             pass
+                    elif key == 'yearly_vibe':
+                        result['yearly_vibe'] = value
 
             persona = PERSONAS.get(result['persona_id'], PERSONAS['jake'])
             result['persona_name'] = persona['name']
@@ -259,7 +341,8 @@ confidence: [0.0-1.0]
                 'show': 'Unknown',
                 'traits': '',
                 'match_reason': str(e),
-                'confidence': 0.0
+                'confidence': 0.0,
+                'yearly_vibe': ''
             }
 
 

@@ -1,8 +1,31 @@
 export interface ChatResult {
-  chat_id: string
-  chat_name: string
-  message_count: number
-  sentiment_breakdown: Record<string, number>
+  user_id: string
+  chat_ids: string[]
+  date_range?: { start: string; end: string }
+  message_stats: {
+    total_in_chat: number
+    user_count: number
+    user_percentage: number
+  }
+  word_frequency: Record<string, number>
+  emoji_frequency: Record<string, number>
+  wordcloud_image: string
+  sentiment_by_month: Record<string, {
+    primary: string
+    secondary: string
+    confidence: number
+    vibe_summary: string
+  }>
+  persona: {
+    persona_id: string
+    persona_name: string
+    show: string
+    traits: string
+    match_reason: string
+    confidence: number
+  }
+  top_words: string[]
+  top_emojis: string[]
 }
 
 export interface WrappedResult {

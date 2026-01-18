@@ -3,15 +3,21 @@ import type { Chat, WrappedResult } from "@/lib/types"
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000"
 
-interface ApiState<T> {
-  data: T | null
-  loading: boolean
-  error: string | null
-}
-
 export function useApi() {
   const [sessionId, setSessionId] = useState<string | null>(
     localStorage.getItem("session_id")
+  )
+  const [userId, setUserId] = useState<string | null>(
+    localStorage.getItem("user_id")
+  )
+  const [phone, setPhone] = useState<string | null>(
+    localStorage.getItem("phone")
+  )
+  const [code, setCode] = useState<string | null>(
+    localStorage.getItem("code")
+  )
+  const [password, setPassword] = useState<string | null>(
+    localStorage.getItem("password")
   )
 
   const request = useCallback(
@@ -19,18 +25,12 @@ export function useApi() {
       endpoint: string,
       options?: RequestInit
     ): Promise<T> => {
-      const headers: HeadersInit = {
-        "Content-Type": "application/json",
-        ...(options?.headers || {}),
-      }
-
-      if (sessionId) {
-        (headers as Record<string, string>)["X-Session-Id"] = sessionId
-      }
-
       const response = await fetch(`${API_BASE}${endpoint}`, {
         ...options,
-        headers,
+        headers: {
+          "Content-Type": "application/json",
+          ...(options?.headers || {}),
+        },
       })
 
       if (!response.ok) {
@@ -40,93 +40,126 @@ export function useApi() {
 
       return response.json()
     },
-    [sessionId]
+    []
   )
 
-  // Auth endpoints
-  const sendCode = async (phone: string) => {
-    const data = await request<{ session_id: string }>("/auth/send-code", {
+  // POST /auth/send-otp
+  const sendCode = async (phoneNumber: string) => {
+    const data = await request<{ session_id: string }>("/auth/send-otp", {
       method: "POST",
-      body: JSON.stringify({ phone }),
+      body: JSON.stringify({ phone: phoneNumber }),
     })
     setSessionId(data.session_id)
+    setPhone(phoneNumber)
     localStorage.setItem("session_id", data.session_id)
+    localStorage.setItem("phone", phoneNumber)
     return data
   }
 
-  const verifyCode = async (code: string, password?: string) => {
-    return request<{ success: boolean; needs_2fa?: boolean }>("/auth/verify", {
+  // POST /auth/verify-otp
+  const verifyCode = async (otpCode: string, pwd?: string) => {
+    if (!sessionId) throw new Error("No session")
+
+    const body: { session_id: string; code: string; password?: string } = {
+      session_id: sessionId,
+      code: otpCode,
+    }
+    if (pwd) {
+      body.password = pwd
+    }
+
+    const data = await request<{ status: string; user_id: number; first_name: string }>("/auth/verify-otp", {
       method: "POST",
-      body: JSON.stringify({ code, password }),
+      body: JSON.stringify(body),
     })
+
+    setUserId(String(data.user_id))
+    setCode(otpCode)
+    localStorage.setItem("user_id", String(data.user_id))
+    localStorage.setItem("code", otpCode)
+
+    // Store password if provided (for 2FA users)
+    if (pwd) {
+      setPassword(pwd)
+      localStorage.setItem("password", pwd)
+    }
+
+    return {
+      success: data.status === "authenticated",
+      needs_2fa: false,
+      user_id: data.user_id,
+      first_name: data.first_name
+    }
   }
 
-  // Chat endpoints
-  const getChats = async (page = 1, limit = 20) => {
-    return request<{ chats: Chat[]; total: number; pages: number }>(
-      `/chats?page=${page}&limit=${limit}`
+  // GET /chats/top
+  const getChats = async () => {
+    if (!sessionId) throw new Error("No session")
+
+    const data = await request<{ top_chats: Array<{ chat_id: number; name: string; unread_count: number }> }>(
+      `/chats/top?session_id=${encodeURIComponent(sessionId)}`
     )
+
+    // Transform to frontend Chat format
+    const chats: Chat[] = data.top_chats.map(c => ({
+      id: String(c.chat_id),
+      name: c.name || "Unknown",
+      messageCount: c.unread_count || 0,
+      type: "private" as const
+    }))
+
+    return { chats, total: chats.length, pages: 1 }
   }
 
-  // Wrapped endpoints
-  const generateWrapped = async (chatIds: string[]) => {
-    return request<{ task_id: string }>("/wrapped/generate", {
+  // POST /chats/messages - returns wrapped result directly (no async task)
+  const generateWrapped = async (chatIds: string[]): Promise<WrappedResult> => {
+    if (!sessionId) throw new Error("No session")
+    if (!phone) throw new Error("No phone - please re-authenticate")
+    if (!code) throw new Error("No code - please re-authenticate")
+
+    const body: Record<string, unknown> = {
+      session_id: sessionId,
+      chat_ids: chatIds.map(id => parseInt(id, 10)),
+      phone,
+      code,
+    }
+
+    // Include password if available (for 2FA users)
+    if (password) {
+      body.password = password
+    }
+
+    const data = await request<WrappedResult>("/chats/messages", {
       method: "POST",
-      body: JSON.stringify({ chat_ids: chatIds }),
+      body: JSON.stringify(body),
     })
-  }
 
-  const getWrappedStatus = async (taskId: string) => {
-    return request<{ status: string; progress?: number; result?: WrappedResult }>(
-      `/wrapped/status/${taskId}`
-    )
-  }
-
-  const getWrappedResult = async (taskId: string) => {
-    return request<WrappedResult>(`/wrapped/result/${taskId}`)
+    return data
   }
 
   const logout = () => {
     setSessionId(null)
+    setUserId(null)
+    setPhone(null)
+    setCode(null)
+    setPassword(null)
     localStorage.removeItem("session_id")
+    localStorage.removeItem("user_id")
+    localStorage.removeItem("phone")
+    localStorage.removeItem("code")
+    localStorage.removeItem("password")
   }
 
   return {
     sessionId,
+    userId,
+    phone,
+    code,
     isAuthenticated: !!sessionId,
     sendCode,
     verifyCode,
     getChats,
     generateWrapped,
-    getWrappedStatus,
-    getWrappedResult,
     logout,
   }
-}
-
-// Simple state hook for async operations
-export function useAsyncState<T>(initialData: T | null = null): [
-  ApiState<T>,
-  {
-    setLoading: () => void
-    setData: (data: T) => void
-    setError: (error: string) => void
-    reset: () => void
-  }
-] {
-  const [state, setState] = useState<ApiState<T>>({
-    data: initialData,
-    loading: false,
-    error: null,
-  })
-
-  return [
-    state,
-    {
-      setLoading: () => setState({ data: null, loading: true, error: null }),
-      setData: (data: T) => setState({ data, loading: false, error: null }),
-      setError: (error: string) => setState({ data: null, loading: false, error }),
-      reset: () => setState({ data: initialData, loading: false, error: null }),
-    },
-  ]
 }

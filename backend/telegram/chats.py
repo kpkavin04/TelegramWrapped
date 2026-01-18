@@ -1,7 +1,7 @@
 from telethon.tl.functions.messages import GetHistoryRequest
 from telethon.tl.types import Channel, Chat, User
 
-async def get_top_chats(client, limit=100):
+async def get_top_chats(client, limit=50):
     dialogs = await client.get_dialogs()
 
     top_chats = []

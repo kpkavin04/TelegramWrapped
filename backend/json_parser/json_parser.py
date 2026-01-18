@@ -48,11 +48,11 @@ class TelegramExportParser:
         return filtered
 
     def add_month_field(self):
-        """Add YYYY-MM month field for grouping"""
+        """Add month field for grouping (padded: 01-12)"""
         for msg in self.messages:
             try:
                 dt = datetime.fromisoformat(msg['date'].replace('Z', '+00:00'))
-                msg['month'] = dt.strftime('%Y-%m')
+                msg['month'] = str(dt.month).zfill(2)  # "01", "02", ... "12"
             except:
                 msg['month'] = 'unknown'
 

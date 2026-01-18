@@ -56,7 +56,7 @@ export function ChatCard({ chat, selected, onSelect, index = 0 }: ChatCardProps)
         <div className="flex-1 min-w-0">
           <h3 className="font-medium text-text-primary truncate">{chat.name}</h3>
           <p className="text-sm text-text-secondary">
-            {chat.messageCount.toLocaleString()} messages
+            {chat.messageCount.toLocaleString()} unread messages
           </p>
         </div>
       </div>

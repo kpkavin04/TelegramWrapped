@@ -44,14 +44,17 @@ export function VerifyPage() {
     setError(null)
 
     try {
-      const result = await verifyCode(otp, needs2fa ? password : undefined)
-      if (result.needs_2fa) {
-        setNeeds2fa(true)
-      } else {
-        navigate("/chats")
-      }
+      await verifyCode(otp, needs2fa ? password : undefined)
+      navigate("/chats")
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Verification failed")
+      const message = err instanceof Error ? err.message : "Verification failed"
+      // Backend returns "2FA enabled — password required" when 2FA needed
+      if (message.includes("2FA")) {
+        setNeeds2fa(true)
+        setError(null)
+      } else {
+        setError(message)
+      }
     } finally {
       setLoading(false)
     }
@@ -78,7 +81,7 @@ export function VerifyPage() {
         transition={{ duration: 0.5 }}
       >
         <Card className="w-full max-w-md">
-          <CardHeader className="text-center">
+          <CardHeader className="text-center relative">
             <Button
               variant="ghost"
               size="icon"

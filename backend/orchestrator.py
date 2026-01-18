@@ -3,6 +3,7 @@ Telegram Wrapped Orchestrator
 Main interface for analyzing chat exports
 """
 
+import asyncio
 from typing import Dict, List, Any, Optional
 from collections import Counter
 
@@ -31,7 +32,7 @@ class TelegramWrappedOrchestrator:
         parser.filter_text_messages()
         return parser.get_user_stats()
 
-    def analyze_chat(self, json_data: Dict, user_id: str) -> Dict[str, Any]:
+    async def analyze_chat(self, json_data: Dict, user_id: str) -> Dict[str, Any]:
         """Analyze single chat for a specific user
 
         Args:
@@ -60,12 +61,12 @@ class TelegramWrappedOrchestrator:
         emoji_freq = freq_counter.count_emojis()
         wordcloud_b64 = freq_counter.generate_wordcloud()
 
-        # 3. Sentiment analysis (all messages for context)
-        sentiment = self.llm.analyze_sentiment_by_month(all_data['messages'])
+        # 3. Sentiment analysis (all messages for context) - ASYNC PARALLEL
+        sentiment = await self.llm.analyze_sentiment_by_month(all_data['messages'])
 
-        # 4. Persona matching based on sentiment + words
+        # 4. Persona matching based on sentiment + words - ASYNC
         top_words = list(word_freq.keys())[:20]
-        persona = self.llm.match_persona(sentiment, top_words)
+        persona = await self.llm.match_persona(sentiment, top_words)
 
         # 5. Build result
         total_in_chat = len(parser.messages)
@@ -85,12 +86,15 @@ class TelegramWrappedOrchestrator:
             'wordcloud_image': wordcloud_b64,
             'sentiment_by_month': sentiment,
             'persona': persona,
+            'yearly_vibe': persona.get('yearly_vibe', ''),
             'top_words': list(word_freq.keys())[:10],
-            'top_emojis': list(emoji_freq.keys())[:5]
+            'top_emojis': list(emoji_freq.keys())[:5],
+            # Store parsed user messages for multi-chat aggregation
+            '_user_messages': user_messages
         }
 
-    def analyze_multi_chat(self, chats: List[Dict], user_id: str) -> Dict[str, Any]:
-        """Aggregate stats across multiple chats
+    async def analyze_multi_chat(self, chats: List[Dict], user_id: str) -> Dict[str, Any]:
+        """Aggregate stats across multiple chats - PARALLEL
 
         Args:
             chats: List of raw Telegram export JSONs
@@ -99,17 +103,16 @@ class TelegramWrappedOrchestrator:
         Returns:
             {per_chat: [...], aggregate: {...}}
         """
-        per_chat_results = []
+        # Run all chat analyses in parallel
+        tasks = [self.analyze_chat(chat_data, user_id) for chat_data in chats]
+        per_chat_results = await asyncio.gather(*tasks)
+
         all_word_freq = Counter()
         all_emoji_freq = Counter()
         sentiment_by_month_raw = {}  # {month: [list of sentiment dicts]}
         all_user_text = []
 
-        for chat_data in chats:
-            # Analyze each chat
-            result = self.analyze_chat(chat_data, user_id)
-            per_chat_results.append(result)
-
+        for result in per_chat_results:
             # Aggregate word frequencies
             all_word_freq.update(result['word_frequency'])
 
@@ -122,11 +125,8 @@ class TelegramWrappedOrchestrator:
                     sentiment_by_month_raw[month] = []
                 sentiment_by_month_raw[month].append(data)
 
-            # Collect text for aggregate wordcloud
-            parser = TelegramExportParser(chat_data)
-            parser.load_export()
-            parser.filter_text_messages()
-            user_msgs = parser.get_user_messages(user_id)
+            # Use pre-parsed user messages (avoid duplicate parsing)
+            user_msgs = result.get('_user_messages', [])
             all_user_text.extend(msg.get('text', '') for msg in user_msgs)
 
         # Merge sentiments: keep most common emotion per month (tiebreaker: highest confidence)
@@ -173,15 +173,21 @@ class TelegramWrappedOrchestrator:
         freq_counter = FrequencyCounter(combined_text)
         aggregate_wordcloud = freq_counter.generate_wordcloud()
 
-        # Persona matching on aggregate sentiment + words
+        # Persona matching on aggregate sentiment + words - ASYNC
         aggregate_top_words = [w for w, _ in all_word_freq.most_common(20)]
-        aggregate_persona = self.llm.match_persona(all_sentiment, aggregate_top_words)
+        aggregate_persona = await self.llm.match_persona(all_sentiment, aggregate_top_words)
 
         # Total stats
         total_messages = sum(r['message_stats']['user_count'] for r in per_chat_results)
 
+        # Remove internal _user_messages from results before returning
+        clean_results = []
+        for r in per_chat_results:
+            clean_r = {k: v for k, v in r.items() if not k.startswith('_')}
+            clean_results.append(clean_r)
+
         return {
-            'per_chat': per_chat_results,
+            'per_chat': clean_results,
             'aggregate': {
                 'user_id': user_id,
                 'total_chats': len(chats),
@@ -191,6 +197,7 @@ class TelegramWrappedOrchestrator:
                 'wordcloud_image': aggregate_wordcloud,
                 'sentiment_by_month': all_sentiment,
                 'persona': aggregate_persona,
+                'yearly_vibe': aggregate_persona.get('yearly_vibe', ''),
                 'top_words': [w for w, _ in all_word_freq.most_common(10)],
                 'top_emojis': [e for e, _ in all_emoji_freq.most_common(5)]
             }
